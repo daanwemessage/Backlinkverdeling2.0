@@ -7,6 +7,10 @@ Rekenregels
 2. Target-URL's: omgezet naar https, zonder www, met slash aan het eind.
 3. Anchors: hoofdletters tellen niet mee; getoond wordt de schrijfwijze
    die het vaakst voorkomt. Lege anchors worden "(geen anchor)".
+   Anchors die de merknaam bevatten worden "Branded". De merknaam komt
+   automatisch uit het domein waar de links naartoe gaan. Uitzondering:
+   een kale URL met een pad erachter (alcedo.nl/brandoverslag/) blijft
+   een eigen anchor. Alleen de kale homepage-URL telt als Branded.
 4. Verwijzend domein: het adres van de verwijzende pagina zonder www.
    Subdomeinen tellen als aparte domeinen.
 5. Per verwijzend domein telt elke anchor en elke target-URL één keer.
@@ -14,11 +18,13 @@ Rekenregels
 """
 
 import io
+import re
 from urllib.parse import urlparse
 
 import pandas as pd
 
 GEEN_ANCHOR = "(geen anchor)"
+BRANDED = "Branded"
 
 
 # ---------- Inlezen ----------
@@ -69,6 +75,32 @@ def voeg_redirects_samen(df: pd.DataFrame) -> pd.DataFrame:
     return df.drop_duplicates(subset=sleutel, keep="last")
 
 
+def merknaam(targets: pd.Series) -> str:
+    """Het meest voorkomende doeldomein, zonder extensie: alcedo.nl wordt alcedo."""
+    hosts = targets.map(lambda u: zonder_www(urlparse(str(u)).netloc))
+    host = hosts.mode().iloc[0] if len(hosts) else ""
+    delen = host.split(".")
+    return delen[-2] if len(delen) >= 2 else host
+
+
+def alleen_letters(tekst: str) -> str:
+    """Kleine letters en cijfers, zonder spaties, streepjes of punten."""
+    return re.sub(r"[^a-z0-9]", "", tekst.lower())
+
+
+URL_PATROON = re.compile(r"^(https?://)?(www\.)?[a-z0-9.-]+\.[a-z]{2,}(/.*)?$")
+
+
+def is_url_met_pad(anchor: str) -> bool:
+    """True voor anchors als alcedo.nl/brandoverslag/, False voor alcedo.nl/."""
+    tekst = anchor.strip().lower()
+    if not URL_PATROON.match(tekst):
+        return False
+    tekst = re.sub(r"^(https?://)?(www\.)?", "", tekst)
+    pad = tekst.split("/", 1)[1] if "/" in tekst else ""
+    return pad.strip("/") != ""
+
+
 def bereid_voor(df: pd.DataFrame) -> pd.DataFrame:
     links = voeg_redirects_samen(df)
     links["Domein"] = links["Referring page URL"].map(verwijzend_domein)
@@ -83,6 +115,14 @@ def bereid_voor(df: pd.DataFrame) -> pd.DataFrame:
         .agg(lambda s: s.value_counts().index[0])
     )
     links["Anchor"] = links["_anchor_sleutel"].map(weergave)
+
+    merk = alleen_letters(merknaam(links["Target URL"]))
+    if merk:
+        is_branded = links["_anchor_ruw"].map(
+            lambda a: merk in alleen_letters(a) and not is_url_met_pad(a)
+        )
+        links.loc[is_branded, "Anchor"] = BRANDED
+    links.attrs["merknaam"] = merk
     return links
 
 
@@ -148,6 +188,10 @@ def main():
     links = bereid_voor(df)
     anchors = verdeling(links, "Anchor")
     targets = verdeling(links, "Target-URL")
+
+    if links.attrs.get("merknaam"):
+        st.caption(f"Herkende merknaam: **{links.attrs['merknaam']}**. "
+                   "Anchors die deze naam bevatten vallen onder Branded.")
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Backlinks", f"{len(links):,}".replace(",", "."))
